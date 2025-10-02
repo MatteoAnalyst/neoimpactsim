@@ -1,6 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Shield, Zap, Target, DollarSign, Clock, Globe, Play, RotateCcw, MapPin } from 'lucide-react';
-import * as THREE from 'three';
 
 // Types kept intentionally loose to integrate easily with existing app data
 export type ImpactLocation = { lat: number; lng: number; name?: string };
@@ -244,10 +243,7 @@ const AdvancedDeflectionStrategy: React.FC<AdvancedDeflectionStrategyProps> = ({
   const trajectoryRef = useRef<HTMLDivElement | null>(null);
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
 
-  // Three.js refs
-  const sceneRef = useRef<THREE.Scene | null>(null);
-  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
-  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  // Animation frame ref (used for progress animation)
   const rafRef = useRef<number | null>(null);
 
   // Animation state refs (to avoid stale closures in RAF)
@@ -582,232 +578,170 @@ const AdvancedDeflectionStrategy: React.FC<AdvancedDeflectionStrategyProps> = ({
     };
   }, [deflectionEnabled, deflectionResult, velocityChange]);
 
-  // Three.js 3D Orbital Visualization
+  // Simplified Canvas-based Orbital Visualization (replaces 3D)
   useEffect(() => {
     if (!deflectionEnabled || !threeMountRef.current) return;
 
     const container = threeMountRef.current;
     container.innerHTML = '';
 
-    const scene = new THREE.Scene();
     const width = container.clientWidth || 600;
     const height = 400;
 
-    const camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 5000);
-    camera.position.set(25, 15, 25);
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    canvas.style.width = '100%';
+    canvas.style.height = `${height}px`;
+    canvas.style.borderRadius = '8px';
+    canvas.style.background = 'linear-gradient(180deg, #0b1020 0%, #000 100%)';
+    container.appendChild(canvas);
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setPixelRatio(window.devicePixelRatio);
-    renderer.setSize(width, height);
-    container.appendChild(renderer.domElement);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return () => {};
 
-    sceneRef.current = scene;
-    rendererRef.current = renderer;
-    cameraRef.current = camera;
+    const earthX = width / 2;
+    const earthY = height / 2;
+    const earthRadius = 22;
 
-    // Earth + atmosphere (3D units not in meters; purely visual)
-    const earthRadiusUnits = 2.5;
-    const earthGeo = new THREE.SphereGeometry(earthRadiusUnits, 64, 64);
-    const earthMat = new THREE.MeshPhongMaterial({ color: 0x22c55e });
-    const earthMesh = new THREE.Mesh(earthGeo, earthMat);
-    scene.add(earthMesh);
+    const createTrajectoryPoints = (isDeflected = false) => {
+      const points: [number, number][] = [];
+      const segments = 160;
+      const deflectionScale = isDeflected ? clamp(velocityChange * 1000, 0.5, 60) : 0;
+      for (let i = 0; i <= segments; i++) {
+        const t = i / segments;
+        const baseX = 40 + t * (width - 160);
+        const baseY = earthY + Math.sin(t * Math.PI * 0.8) * 60 - 30;
+        const deflectionOffset = isDeflected ? t * t * deflectionScale : 0;
+        points.push([baseX, baseY + deflectionOffset]);
+      }
+      return points;
+    };
 
-    const atmosphereGeo = new THREE.SphereGeometry(earthRadiusUnits * 1.05, 64, 64);
-    const atmosphereMat = new THREE.ShaderMaterial({
-      vertexShader: `
-        varying vec3 vNormal;
-        void main(){ vNormal = normalize(normalMatrix * normal);
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }`,
-      fragmentShader: `
-        uniform float c; uniform float p; varying vec3 vNormal;
-        void main(){
-          float intensity = pow(c - dot(vNormal, vec3(0.0,0.0,1.0)), p);
-          gl_FragColor = vec4(0.3,0.6,1.0, intensity * 0.3);
-        }`,
-      transparent: true,
-      uniforms: { c: { value: 0.5 }, p: { value: 4.0 } },
-    });
-    const atmosphere = new THREE.Mesh(atmosphereGeo, atmosphereMat);
-    scene.add(atmosphere);
+    const originalPoints = createTrajectoryPoints(false);
+    const deflectedPoints = createTrajectoryPoints(true);
 
-    // Stars (modest count for performance)
-    const starsGeometry = new THREE.BufferGeometry();
-    const starCount = 5000;
-    const starsVertices = new Float32Array(starCount * 3);
-    const starsColors = new Float32Array(starCount * 3);
-    for (let i = 0; i < starCount; i++) {
-      const phi = Math.acos(2 * Math.random() - 1);
-      const theta = 2 * Math.PI * Math.random();
-      const radius = 2000 + Math.random() * 3000;
-      const x = radius * Math.sin(phi) * Math.cos(theta);
-      const y = radius * Math.sin(phi) * Math.sin(theta);
-      const z = radius * Math.cos(phi);
-      starsVertices[i * 3 + 0] = x;
-      starsVertices[i * 3 + 1] = y;
-      starsVertices[i * 3 + 2] = z;
-      // color bias
-      const t = Math.random();
-      let r = 1, g = 1, b = 1;
-      if (t < 0.1) { r = 0.6; g = 0.8; b = 1.0; }
-      else if (t < 0.3) { r = 1.0; g = 1.0; b = 1.0; }
-      else if (t < 0.7) { r = 1.0; g = 0.9; b = 0.7; }
-      else { r = 1.0; g = 0.6; b = 0.4; }
-      starsColors[i * 3 + 0] = r; starsColors[i * 3 + 1] = g; starsColors[i * 3 + 2] = b;
-    }
-    starsGeometry.setAttribute('position', new THREE.BufferAttribute(starsVertices, 3));
-    starsGeometry.setAttribute('color', new THREE.BufferAttribute(starsColors, 3));
-    const starsMaterial = new THREE.PointsMaterial({ size: 2, vertexColors: true, transparent: true });
-    const stars = new THREE.Points(starsGeometry, starsMaterial);
-    scene.add(stars);
+    const drawScene = () => {
+      ctx.clearRect(0, 0, width, height);
 
-    // Simple orbital curves (visual only)
-    const createRealisticTrajectory = (color: number, isDeflected = false) => {
-      const trajectoryPoints: THREE.Vector3[] = [];
-      const positions: THREE.Vector3[] = [];
+      // subtle stars
+      ctx.save();
+      for (let i = 0; i < 150; i++) {
+        ctx.fillStyle = 'rgba(148,163,184,0.35)';
+        const x = Math.random() * width;
+        const y = Math.random() * height;
+        ctx.fillRect(x, y, 1, 1);
+      }
+      ctx.restore();
 
-      const semiMajorAxis = 1.3; // AU units (visual)
-      const eccentricity = 0.4 + (isDeflected ? 0.05 : 0);
-      const inclination = (5 + (isDeflected ? 2 : 0)) * (Math.PI / 180);
-      const longitudeOfAscendingNode = 0;
-      const argumentOfPeriapsis = Math.PI / 4;
+      // Earth
+      ctx.beginPath();
+      ctx.arc(earthX, earthY, earthRadius + 3, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(59,130,246,0.3)';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(earthX, earthY, earthRadius, 0, Math.PI * 2);
+      ctx.fillStyle = '#22C55E';
+      ctx.strokeStyle = '#16A34A';
+      ctx.lineWidth = 2;
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#F1F5F9';
+      ctx.font = 'bold 12px system-ui, Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText('Earth', earthX, earthY + earthRadius + 18);
 
-      const numPoints = 500;
-      for (let i = 0; i < numPoints; i++) {
-        const meanAnomaly = (i / numPoints) * 2 * Math.PI;
-        let E = meanAnomaly;
-        for (let j = 0; j < 5; j++) E = meanAnomaly + eccentricity * Math.sin(E);
-        const trueAnomaly = 2 * Math.atan2(
-          Math.sqrt(1 + eccentricity) * Math.sin(E / 2),
-          Math.sqrt(1 - eccentricity) * Math.cos(E / 2)
-        );
-        const radius = semiMajorAxis * (1 - eccentricity * Math.cos(E));
+      const drawPath = (points: [number, number][], color: string, dashed = false) => {
+        ctx.beginPath();
+        points.forEach(([x, y], i) => {
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 3;
+        if (dashed) ctx.setLineDash([8, 4]); else ctx.setLineDash([]);
+        ctx.globalAlpha = 0.9;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        ctx.setLineDash([]);
+      };
 
-        const cosArgPeri = Math.cos(argumentOfPeriapsis);
-        const sinArgPeri = Math.sin(argumentOfPeriapsis);
-        const cosIncl = Math.cos(inclination);
-        const sinIncl = Math.sin(inclination);
-        const cosLongAsc = Math.cos(longitudeOfAscendingNode);
-        const sinLongAsc = Math.sin(longitudeOfAscendingNode);
+      drawPath(originalPoints, '#EF4444');
+      drawPath(deflectedPoints, '#22C55E', true);
 
-        const orbitalX = radius * Math.cos(trueAnomaly);
-        const orbitalY = radius * Math.sin(trueAnomaly);
+      // label chips
+      const labelAt = Math.floor(originalPoints.length * 0.2);
+      const [lx, ly] = originalPoints[labelAt];
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillRect(lx - 35, ly - 24, 70, 16);
+      ctx.fillStyle = '#EF4444';
+      ctx.font = 'bold 10px system-ui, Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText('Original', lx, ly - 12);
 
-        const x = (cosLongAsc * cosArgPeri - sinLongAsc * sinArgPeri * cosIncl) * orbitalX +
-                  (-cosLongAsc * sinArgPeri - sinLongAsc * cosArgPeri * cosIncl) * orbitalY;
-        const y = (sinLongAsc * cosArgPeri + cosLongAsc * sinArgPeri * cosIncl) * orbitalX +
-                  (-sinLongAsc * sinArgPeri + cosLongAsc * cosArgPeri * cosIncl) * orbitalY;
-        const z = (sinIncl * sinArgPeri) * orbitalX + (sinIncl * cosArgPeri) * orbitalY;
+      const [dlx, dly] = deflectedPoints[labelAt];
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillRect(dlx - 38, dly - 24, 76, 16);
+      ctx.fillStyle = '#22C55E';
+      ctx.fillText('Deflected', dlx, dly - 12);
 
-        const scaleFactor = 30; // purely visual
-        const p = new THREE.Vector3(x * scaleFactor, z * scaleFactor, y * scaleFactor);
-        trajectoryPoints.push(p);
-        positions.push(p.clone());
+      // deflection impulse glyph
+      ctx.fillStyle = '#F59E0B';
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 2;
+      const gx = 160, gy = earthY - 60;
+      ctx.beginPath(); ctx.arc(gx, gy, 8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(gx, gy);
+      ctx.lineTo(gx + 22 * Math.cos(Math.PI / 4), gy + 22 * Math.sin(Math.PI / 4));
+      ctx.strokeStyle = '#F59E0B';
+      ctx.lineWidth = 4; ctx.stroke();
+      ctx.fillStyle = '#F59E0B';
+      ctx.font = 'bold 10px system-ui, Arial';
+      ctx.textAlign = 'left';
+      ctx.fillText(`Deflection: ${(velocityChange * 1000).toFixed(1)} m/s`, gx + 14, gy - 12);
+
+      // moving asteroids
+      const idx = Math.floor((progressRef.current / 100) * (originalPoints.length - 1));
+      const [ox, oy] = originalPoints[Math.max(0, Math.min(idx, originalPoints.length - 1))];
+      const [dx, dy] = deflectedPoints[Math.max(0, Math.min(idx, deflectedPoints.length - 1))];
+
+      const drawAsteroid = (x: number, y: number, color: string) => {
+        ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = color; ctx.fill();
+        ctx.lineWidth = 1; ctx.strokeStyle = '#FFFFFF'; ctx.stroke();
+      };
+      if (isAnimatingRef.current && progressRef.current <= 100) {
+        drawAsteroid(ox, oy, '#EF4444');
+        drawAsteroid(dx, dy, '#22C55E');
       }
 
-      const trajectoryGeometry = new THREE.BufferGeometry().setFromPoints(trajectoryPoints);
-      const trajectoryMaterial = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.8 });
-      const trajectory = new THREE.Line(trajectoryGeometry, trajectoryMaterial);
-      scene.add(trajectory);
-
-      const asteroidGeometry = new THREE.IcosahedronGeometry(0.3, 2);
-      const asteroidMaterial = new THREE.MeshPhongMaterial({ color, shininess: 30 });
-      const asteroid = new THREE.Mesh(asteroidGeometry, asteroidMaterial);
-      scene.add(asteroid);
-
-      return { trajectory, asteroid, positions };
+      // footer legend
+      ctx.fillStyle = '#CBD5E1';
+      ctx.font = 'bold 11px system-ui, Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText('Simplified Orbital Trajectory (Top-Down View)', width / 2, 18);
     };
 
-    const originalTrajectory = createRealisticTrajectory(0xff3366, false);
-    const deflectedTrajectory = createRealisticTrajectory(0x33ff66, true);
-
-    // Lights
-    scene.add(new THREE.AmbientLight(0x404040, 0.2));
-    const sunLight = new THREE.DirectionalLight(0xffffff, 1.5);
-    sunLight.position.set(100, 0, 50);
-    scene.add(sunLight);
-
-    // Simple mouse controls
-    let mouseDown = false;
-    let mouseX = 0;
-    let mouseY = 0;
-    let cameraDistance = 40;
-    let cameraTheta = Math.PI / 4;
-    let cameraPhi = Math.PI / 6;
-
-    const handleMouseDown = (event: MouseEvent) => {
-      mouseDown = true;
-      mouseX = event.clientX;
-      mouseY = event.clientY;
-    };
-    const handleMouseMove = (event: MouseEvent) => {
-      if (!mouseDown) return;
-      const deltaX = event.clientX - mouseX;
-      const deltaY = event.clientY - mouseY;
-      cameraTheta -= deltaX * 0.01;
-      cameraPhi = clamp(cameraPhi - deltaY * 0.01, 0.1, Math.PI - 0.1);
-      mouseX = event.clientX;
-      mouseY = event.clientY;
-    };
-    const handleMouseUp = () => { mouseDown = false; };
-    const handleWheel = (event: WheelEvent) => {
-      cameraDistance = clamp(cameraDistance + event.deltaY * 0.05, 15, 200);
-    };
-
-    renderer.domElement.addEventListener('mousedown', handleMouseDown);
-    renderer.domElement.addEventListener('mousemove', handleMouseMove);
-    renderer.domElement.addEventListener('mouseup', handleMouseUp);
-    renderer.domElement.addEventListener('wheel', handleWheel);
-
-    const animate = () => {
-      const x = cameraDistance * Math.sin(cameraPhi) * Math.cos(cameraTheta);
-      const y = cameraDistance * Math.cos(cameraPhi);
-      const z = cameraDistance * Math.sin(cameraPhi) * Math.sin(cameraTheta);
-      camera.position.set(x, y, z);
-      camera.lookAt(0, 0, 0);
-
-      earthMesh.rotation.y += 0.002;
-      atmosphere.rotation.y += 0.002;
-
-      if (isAnimatingRef.current) {
-        const positionsCount = originalTrajectory.positions.length;
-        const idx = Math.min(
-          Math.floor((progressRef.current / 100) * (positionsCount - 1)),
-          positionsCount - 1
-        );
-        originalTrajectory.asteroid.position.copy(originalTrajectory.positions[idx]);
-        deflectedTrajectory.asteroid.position.copy(deflectedTrajectory.positions[idx]);
-      }
-
-      renderer.render(scene, camera);
-      rafRef.current = requestAnimationFrame(animate);
-    };
-    animate();
+    // draw periodically to reflect animation progress
+    const interval = window.setInterval(drawScene, 50);
+    drawScene();
 
     const onResize = () => {
-      if (!container) return;
       const w = container.clientWidth || 600;
-      const h = 400;
-      renderer.setSize(w, h);
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
+      canvas.width = w; canvas.height = height;
+      drawScene();
     };
     window.addEventListener('resize', onResize);
 
     return () => {
       window.removeEventListener('resize', onResize);
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      renderer.domElement.removeEventListener('mousedown', handleMouseDown);
-      renderer.domElement.removeEventListener('mousemove', handleMouseMove);
-      renderer.domElement.removeEventListener('mouseup', handleMouseUp);
-      renderer.domElement.removeEventListener('wheel', handleWheel);
-      renderer.dispose();
-      container.removeChild(renderer.domElement);
-      scene.clear();
+      window.clearInterval(interval);
+      container.innerHTML = '';
     };
-  }, [deflectionEnabled]);
+  }, [deflectionEnabled, velocityChange]);
 
-  // World map: Canvas-based impact visualization
+  // World map: Canvas-based impact visualization with real equirectangular map
   useEffect(() => {
     if (!deflectionResult || !mapContainerRef.current) return;
 
@@ -815,135 +749,99 @@ const AdvancedDeflectionStrategy: React.FC<AdvancedDeflectionStrategyProps> = ({
     container.innerHTML = '';
 
     const canvas = document.createElement('canvas');
-    canvas.width = 800; // internal resolution
+    canvas.width = 800;
     canvas.height = 400;
     canvas.style.width = '100%';
     canvas.style.height = '400px';
     canvas.style.borderRadius = '12px';
     canvas.style.border = '1px solid #475569';
-    canvas.style.backgroundColor = '#0F172A';
-
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    ctx.fillStyle = '#0F172A';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const worldMapUrl = 'https://upload.wikimedia.org/wikipedia/commons/thumb/8/80/World_map_-_low_resolution.svg/2000px-World_map_-_low_resolution.svg.png';
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
 
     const toCanvas = (lat: number, lng: number) => ({
       x: ((lng + 180) * canvas.width) / 360,
       y: ((90 - lat) * canvas.height) / 180,
     });
 
-    const drawContinent = (coords: [number, number][]) => {
-      if (coords.length < 3) return;
-      ctx.beginPath();
-      const first = toCanvas(coords[0][0], coords[0][1]);
-      ctx.moveTo(first.x, first.y);
-      coords.slice(1).forEach(([lat, lng]) => {
+    const drawImpactLayers = () => {
+      const drawImpactPoint = (lat: number, lng: number, color: string, label: string) => {
         const p = toCanvas(lat, lng);
-        ctx.lineTo(p.x, p.y);
-      });
-      ctx.closePath();
-      ctx.fillStyle = '#10B981';
-      ctx.fill();
-      ctx.strokeStyle = '#059669';
-      ctx.lineWidth = 1;
-      ctx.stroke();
+        const gradient = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, 20);
+        gradient.addColorStop(0, color);
+        gradient.addColorStop(0.5, `${color}80`);
+        gradient.addColorStop(1, `${color}00`);
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 20, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 6, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(p.x - 12, p.y);
+        ctx.lineTo(p.x + 12, p.y);
+        ctx.moveTo(p.x, p.y - 12);
+        ctx.lineTo(p.x, p.y + 12);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(0,0,0,0.8)';
+        ctx.fillRect(p.x + 15, p.y - 20, 170, 35);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = 'bold 14px system-ui, Arial';
+        ctx.fillText(label, p.x + 20, p.y - 5);
+        ctx.fillStyle = '#94A3B8';
+        ctx.font = '12px system-ui, Arial';
+        ctx.fillText(`${lat.toFixed(2)}°, ${lng.toFixed(2)}°`, p.x + 20, p.y + 10);
+      };
+
+      // Original impact
+      drawImpactPoint(originalImpact.lat, originalImpact.lng, '#EF4444', 'Original Impact');
+
+      if (deflectionResult.impactAverted) {
+        ctx.fillStyle = 'rgba(34, 197, 94, 0.2)';
+        ctx.fillRect(20, 20, 240, 50);
+        ctx.strokeStyle = '#22C55E';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(20, 20, 240, 50);
+        ctx.fillStyle = '#22C55E';
+        ctx.font = 'bold 18px system-ui, Arial';
+        ctx.fillText('IMPACT AVOIDED', 30, 50);
+      } else {
+        drawImpactPoint(deflectionResult.newImpactLat, deflectionResult.newImpactLng, '#F59E0B', 'New Impact');
+        const p0 = toCanvas(originalImpact.lat, originalImpact.lng);
+        const p1 = toCanvas(deflectionResult.newImpactLat, deflectionResult.newImpactLng);
+        ctx.strokeStyle = '#FBBF24';
+        ctx.lineWidth = 4;
+        ctx.setLineDash([10, 5]);
+        ctx.beginPath();
+        ctx.moveTo(p0.x, p0.y);
+        ctx.lineTo(p1.x, p1.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
     };
 
-    const continents: [number, number][][] = [
-      [[70, -170], [65, -140], [50, -125], [40, -120], [30, -110], [25, -95], [20, -80], [30, -75], [45, -85], [60, -100], [70, -130]],
-      [[10, -80], [5, -70], [-10, -65], [-25, -70], [-40, -65], [-50, -70], [-35, -75], [-20, -80], [0, -75]],
-      [[70, 10], [60, 40], [50, 30], [45, 40], [55, 20], [65, 5]],
-      [[35, 20], [25, 15], [10, 20], [0, 15], [-20, 20], [-35, 25], [-30, 40], [0, 35], [20, 40]],
-      [[70, 60], [65, 120], [50, 140], [40, 100], [50, 80], [60, 70]],
-      [[-10, 120], [-25, 115], [-35, 130], [-30, 145], [-15, 140]],
-    ];
-
-    continents.forEach(drawContinent);
-
-    // Grid lines
-    ctx.strokeStyle = '#374151';
-    ctx.lineWidth = 0.5;
-    ctx.globalAlpha = 0.3;
-    for (let lat = -60; lat <= 60; lat += 30) {
-      const y = ((90 - lat) * canvas.height) / 180;
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(canvas.width, y);
-      ctx.stroke();
-    }
-    for (let lng = -120; lng <= 120; lng += 60) {
-      const x = ((lng + 180) * canvas.width) / 360;
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, canvas.height);
-      ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
-
-    const drawImpactPoint = (lat: number, lng: number, color: string, label: string) => {
-      const p = toCanvas(lat, lng);
-      const gradient = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, 20);
-      gradient.addColorStop(0, color);
-      gradient.addColorStop(0.5, `${color}80`);
-      gradient.addColorStop(1, `${color}00`);
-      ctx.fillStyle = gradient;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 20, 0, 2 * Math.PI);
-      ctx.fill();
-
-      ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 6, 0, 2 * Math.PI);
-      ctx.fill();
-
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(p.x - 12, p.y);
-      ctx.lineTo(p.x + 12, p.y);
-      ctx.moveTo(p.x, p.y - 12);
-      ctx.lineTo(p.x, p.y + 12);
-      ctx.stroke();
-
-      ctx.fillStyle = 'rgba(0,0,0,0.8)';
-      ctx.fillRect(p.x + 15, p.y - 20, 160, 35);
-
-      ctx.fillStyle = '#FFFFFF';
-      ctx.font = 'bold 14px Arial';
-      ctx.fillText(label, p.x + 20, p.y - 5);
-
+    img.onload = () => {
+      // draw full-bleed world map (equirectangular is 2:1)
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      drawImpactLayers();
+    };
+    img.onerror = () => {
+      // fallback: dark background + message
+      ctx.fillStyle = '#0F172A';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.fillStyle = '#94A3B8';
-      ctx.font = '12px Arial';
-      ctx.fillText(`${lat.toFixed(2)}°, ${lng.toFixed(2)}°`, p.x + 20, p.y + 10);
+      ctx.font = '14px system-ui, Arial';
+      ctx.fillText('Map failed to load. Check network access.', 20, 30);
+      drawImpactLayers();
     };
-
-    // Original impact
-    drawImpactPoint(originalImpact.lat, originalImpact.lng, '#EF4444', 'Original Impact');
-
-    if (deflectionResult.impactAverted) {
-      ctx.fillStyle = 'rgba(34, 197, 94, 0.2)';
-      ctx.fillRect(20, 20, 220, 50);
-      ctx.strokeStyle = '#22C55E';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(20, 20, 220, 50);
-      ctx.fillStyle = '#22C55E';
-      ctx.font = 'bold 18px Arial';
-      ctx.fillText('IMPACT AVOIDED', 30, 50);
-    } else {
-      drawImpactPoint(deflectionResult.newImpactLat, deflectionResult.newImpactLng, '#F59E0B', 'New Impact');
-      const p0 = toCanvas(originalImpact.lat, originalImpact.lng);
-      const p1 = toCanvas(deflectionResult.newImpactLat, deflectionResult.newImpactLng);
-      ctx.strokeStyle = '#FBBF24';
-      ctx.lineWidth = 4;
-      ctx.setLineDash([10, 5]);
-      ctx.beginPath();
-      ctx.moveTo(p0.x, p0.y);
-      ctx.lineTo(p1.x, p1.y);
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
+    img.src = worldMapUrl;
 
     container.appendChild(canvas);
 
